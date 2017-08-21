@@ -1,7 +1,7 @@
 /*
  * Copyright: JessMA Open Source (ldcsaa@gmail.com)
  *
- * Version	: 2.3.19
+ * Version	: 2.3.20
  * Author	: Bruce Liang
  * Website	: http://www.jessma.org
  * Project	: https://github.com/ldcsaa
@@ -28,13 +28,13 @@
 #include "RWLock.h"
 #include "STLHelper.h"
 
-template<class T> class CThread
+template<class T, class P = VOID> class CThread
 {
 private:
-	typedef UINT (T::*F)();
+	typedef UINT (T::*F)(P*);
 
 public:
-	BOOL Start(T* pRunner, F pFunc, int iPriority = THREAD_PRIORITY_NORMAL, UINT uiStackSize = 0, LPSECURITY_ATTRIBUTES lpThreadAttributes = nullptr)
+	BOOL Start(T* pRunner, F pFunc, P* pArg = nullptr, int iPriority = THREAD_PRIORITY_NORMAL, UINT uiStackSize = 0, LPSECURITY_ATTRIBUTES lpThreadAttributes = nullptr)
 	{
 		BOOL isOK = TRUE;
 
@@ -44,6 +44,7 @@ public:
 
 			m_pRunner	= pRunner;
 			m_pFunc		= pFunc;
+			m_pArg		= pArg;
 
 			if(iPriority == THREAD_PRIORITY_NORMAL)
 				m_hThread = (HANDLE)_beginthreadex(lpThreadAttributes, uiStackSize, ThreadProc, (LPVOID)this, 0, &m_uiThreadID);
@@ -123,6 +124,7 @@ public:
 	BOOL IsValid		()	{return m_hThread != nullptr;}
 	T* GetRunner		()	{return m_pRunner;}
 	F GetFunc			()	{return m_pFunc;}
+	P* GetArg			()	{return m_pArg;}
 	DWORD GetThreadID	()	{return m_uiThreadID;}
 
 	HANDLE& GetThreadHandle			() 			{return m_hThread;}
@@ -144,7 +146,7 @@ private:
 	{
 		CThread* pThis = (CThread*)pv;
 
-		return ((pThis->m_pRunner)->*(pThis->m_pFunc))();
+		return ((pThis->m_pRunner)->*(pThis->m_pFunc))(pThis->m_pArg);
 	}
 
 	void Reset()
@@ -153,6 +155,7 @@ private:
 		m_hThread	 = nullptr;
 		m_pRunner	 = nullptr;
 		m_pFunc		 = nullptr;
+		m_pArg		 = nullptr;
 	}
 
 private:
@@ -160,6 +163,7 @@ private:
 	HANDLE	m_hThread;
 	T*		m_pRunner;
 	F		m_pFunc;
+	P*		m_pArg;
 
 	DECLARE_NO_COPY_CLASS(CThread)
 };
@@ -171,14 +175,13 @@ template<class T, typename construct_param_type = void*> class CTlsObj
 	typedef typename TLocalMap::const_iterator	TLocalMapCI;
 
 public:
-	T* TryGet(DWORD dwTID = 0)
+	T* TryGet()
 	{
 		T* pValue = nullptr;
-		if(dwTID == 0) dwTID = ::GetCurrentThreadId();
 
 		{
 			CReadLock locallock(m_lock);
-			TLocalMapCI it = m_map.find(dwTID);
+			TLocalMapCI it = m_map.find(::GetCurrentThreadId());
 
 			if(it != m_map.end())
 				pValue = it->second;
@@ -189,22 +192,14 @@ public:
 
 	T* Get()
 	{
-		DWORD dwTID	= ::GetCurrentThreadId();
-		T* pValue	= TryGet(dwTID);
+		T* pValue = TryGet();
 
 		if(pValue == nullptr)
 		{
+			pValue = Construct();
+
 			CWriteLock locallock(m_lock);
-			TLocalMapCI it = m_map.find(dwTID);
-
-			if(it != m_map.end())
-				pValue = it->second;
-
-			if(pValue == nullptr)
-			{
-				pValue		 = Construct();
-				m_map[dwTID] = pValue;
-			}
+			m_map[::GetCurrentThreadId()] = pValue;
 		}
 
 		return pValue;
@@ -215,44 +210,39 @@ public:
 		return *Get();
 	}
 
-	T* Get(construct_param_type construct_param)
+	T* Get(construct_param_type& construct_param)
 	{
-		DWORD dwTID	= ::GetCurrentThreadId();
-		T* pValue	= TryGet(dwTID);
+		T* pValue = TryGet();
 
 		if(pValue == nullptr)
 		{
+			pValue = ConstructWithParam(construct_param);
 
 			CWriteLock locallock(m_lock);
-			TLocalMapCI it = m_map.find(dwTID);
-
-			if(it != m_map.end())
-				pValue = it->second;
-
-			if(pValue == nullptr)
-			{
-				pValue		 = ConstructWithParam(construct_param);
-				m_map[dwTID] = pValue;
-			}
+			m_map[::GetCurrentThreadId()] = pValue;
 		}
 
 		return pValue;
 	}
 
-	T& GetRef(construct_param_type construct_param)
+	T& GetRef(construct_param_type& construct_param)
 	{
 		return *Get(construct_param);
 	}
 
-	T* SetAndRetriveOldValue(T* pValue)
+	T* SetNewAndGetOld(T* pValue)
 	{
-		DWORD dwTID  = ::GetCurrentThreadId();
-		T* pOldValue = TryGet(dwTID);
+		T* pOldValue = TryGet();
 
 		if(pValue != pOldValue)
 		{
-			CWriteLock locallock(m_lock);
-			m_map[dwTID] = pValue;
+			if(pValue == nullptr)
+				DoRemove();
+			else
+			{
+				CWriteLock locallock(m_lock);
+				m_map[::GetCurrentThreadId()] = pValue;
+			}
 		}
 
 		return pOldValue;
@@ -260,22 +250,20 @@ public:
 
 	void Set(T* pValue)
 	{
-		T* pOldValue = SetAndRetriveOldValue(pValue);
+		T* pOldValue = SetNewAndGetOld(pValue);
 
 		if(pValue != pOldValue)
-			Delete(pOldValue);
+			DoDelete(pOldValue);
 	}
 
 	void Remove()
 	{
-		DWORD dwTID  = ::GetCurrentThreadId();
-		T* pOldValue = TryGet(dwTID);
+		T* pValue = TryGet();
 
-		Delete(pOldValue);
-
+		if(pValue != nullptr)
 		{
-			CWriteLock locallock(m_lock);
-			m_map.erase(dwTID);
+			DoDelete(pValue);
+			DoRemove();
 		}
 	}
 
@@ -285,8 +273,8 @@ public:
 
 		if(!IsEmpty())
 		{
-			for(TLocalMapCI it = m_map.begin(); it != m_map.end(); ++it)
-				Delete(it->second);
+			for(TLocalMapCI it = m_map.begin(), end = m_map.end(); it != end; ++it)
+				DoDelete(it->second);
 
 			m_map.clear();
 		}
@@ -295,17 +283,23 @@ public:
 	TLocalMap&			GetLocalMap()			{return m_map;}
 	const TLocalMap&	GetLocalMap()	const	{return m_map;}
 
-	T*					operator ->	()			{return Get();}
-	const T*			operator ->	()	const	{return Get();}
-	T&					operator *	()			{return GetRef();}
-	const T&			operator *	()	const	{return GetRef();}
-	size_t Size			()				const	{return m_map.size();}
-	bool IsEmpty		()				const	{return m_map.empty();}
+	CTlsObj&	operator = (T* p)		{Set(p); return *this;}
+	T*			operator ->	()			{return Get();}
+	const T*	operator ->	()	const	{return Get();}
+	T&			operator *	()			{return GetRef();}
+	const T&	operator *	()	const	{return GetRef();}
+	size_t Size	()				const	{return m_map.size();}
+	bool IsEmpty()				const	{return m_map.empty();}
 
 public:
 	CTlsObj()
 	{
 
+	}
+
+	CTlsObj(T* pValue)
+	{
+		Set(pValue);
 	}
 
 	~CTlsObj()
@@ -314,7 +308,13 @@ public:
 	}
 
 private:
-	static inline void Delete(T* pValue)
+	inline void DoRemove()
+	{
+		CWriteLock locallock(m_lock);
+		m_map.erase(::GetCurrentThreadId());
+	}
+
+	static inline void DoDelete(T* pValue)
 	{
 		if(pValue != nullptr)
 			delete pValue;
@@ -325,7 +325,7 @@ private:
 		return new T;
 	}
 
-	static inline T* ConstructWithParam(construct_param_type construct_param)
+	static inline T* ConstructWithParam(construct_param_type& construct_param)
 	{
 		return new T(construct_param);
 	}
@@ -335,4 +335,117 @@ private:
 	TLocalMap		m_map;
 
 	DECLARE_NO_COPY_CLASS(CTlsObj)
+};
+
+template<class T> class CTlsSimple
+{
+	typedef unordered_map<DWORD, T>				TLocalMap;
+	typedef typename TLocalMap::iterator		TLocalMapI;
+	typedef typename TLocalMap::const_iterator	TLocalMapCI;
+
+	static const T DEFAULT = (T)(0);
+
+public:
+	BOOL TryGet(T& tValue)
+	{
+		BOOL isOK = FALSE;
+
+		{
+			CReadLock locallock(m_lock);
+			TLocalMapCI it = m_map.find(::GetCurrentThreadId());
+
+			if(it != m_map.end())
+			{
+				tValue	= it->second;
+				isOK	= TRUE;
+			}
+		}
+
+		return isOK;
+	}
+
+	T Get(T tDefault = DEFAULT)
+	{
+		T tValue;
+
+		if(TryGet(tValue))
+			return tValue;
+
+		Set(tDefault);
+
+		return tDefault;
+	}
+
+	T SetNewAndGetOld(T tValue)
+	{
+		T tOldValue;
+
+		if(!TryGet(tOldValue))
+			tOldValue = DEFAULT;
+		else if(tValue != tOldValue)
+			Set(tValue);
+
+		return tOldValue;
+	}
+
+	void Set(T tValue)
+	{
+		CWriteLock locallock(m_lock);
+		m_map[::GetCurrentThreadId()] = tValue;
+	}
+
+	void Remove()
+	{
+		T tValue;
+
+		if(TryGet(tValue))
+		{
+			CWriteLock locallock(m_lock);
+			m_map.erase(::GetCurrentThreadId());
+		}
+	}
+
+	void Clear()
+	{
+		CWriteLock locallock(m_lock);
+
+		if(!IsEmpty())
+			m_map.clear();
+	}
+
+	TLocalMap&			GetLocalMap()			{return m_map;}
+	const TLocalMap&	GetLocalMap()	const	{return m_map;}
+
+	CTlsSimple& operator = (T t) {Set(t); return *this;}
+	BOOL operator		== (T t) {return Get() == t;}
+	BOOL operator		!= (T t) {return Get() != t;}
+	BOOL operator		>= (T t) {return Get() >= t;}
+	BOOL operator		<= (T t) {return Get() <= t;}
+	BOOL operator		 > (T t) {return Get() > t;}
+	BOOL operator		 < (T t) {return Get() < t;}
+
+	size_t Size	()	const	{return m_map.size();}
+	bool IsEmpty()	const	{return m_map.empty();}
+
+public:
+	CTlsSimple()
+	{
+
+	}
+
+	CTlsSimple(T tValue)
+	{
+		Set(tValue);
+	}
+
+	~CTlsSimple()
+	{
+		Clear();
+	}
+
+	DECLARE_NO_COPY_CLASS(CTlsSimple)
+
+private:
+	CSimpleRWLock	m_lock;
+	TLocalMap		m_map;
 };

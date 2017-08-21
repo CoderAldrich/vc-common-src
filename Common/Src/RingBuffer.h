@@ -1,7 +1,7 @@
 /*
  * Copyright: JessMA Open Source (ldcsaa@gmail.com)
  *
- * Version	: 2.3.19
+ * Version	: 2.3.20
  * Author	: Bruce Liang
  * Website	: http://www.jessma.org
  * Project	: https://github.com/ldcsaa
@@ -1425,7 +1425,6 @@ public:
 		BOOL isOK	= FALSE;
 		NPTR pHead	= nullptr;
 		NPTR pNext	= nullptr;
-		T* pVal		= nullptr;
 
 		while(true)
 		{
